@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# radix-up: wrapper around `radix assign` that bootstraps fresh containers.
+#
+#   radix-up init [project]                        create an init script (default if no project)
+#   radix-up list                                  show available projects and their paths
+#   radix-up assign <radix assign args> [--project NAME]
+#                                                  assign, then run the project's init script
+#   radix-up setup <machine-id> [--project NAME]   re-run an init script on an assigned machine
+#   radix-up ssh <machine-id> [cmd...]             ssh with the same options init scripts use
+#   radix-up info                                  show known connection info
+#
+# Projects live in $RADIX_UP_HOME/projects/<name>/ (default ~/.config/radix-up),
+# each holding an init.sh plus optional files/. The init script runs LOCALLY with:
+#   RADIX_SSH_USER RADIX_NODE_IP RADIX_SSH_PORT RADIX_SSH_KEY RADIX_PROXY_JUMP RADIX_MACHINE_ID
+#   RADIX_NODE_RANK RADIX_NUM_NODES RADIX_NODE_IPS RADIX_PROJECT RADIX_PROJECT_DIR
+# and can `source "$RADIX_UP_LIB"` for the remote/push helpers.
+set -euo pipefail
+
+RADIX_UP_HOME="${RADIX_UP_HOME:-$HOME/.config/radix-up}"
+RADIX_BIN="${RADIX_BIN:-radix}"
+SSH_WAIT_SECS="${RADIX_UP_SSH_WAIT:-300}"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")" && pwd)"
+TEMPLATE_DIR="$SCRIPT_DIR/../templates"
+export RADIX_UP_LIB="$SCRIPT_DIR/../lib/radix-up-lib.sh"
+PROJECTS_DIR="$RADIX_UP_HOME/projects"
+STATE_DIR="$RADIX_UP_HOME/state"
+DEFAULT_PROJECT=default
+
+log()  { printf '\033[36m[radix-up]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[33m[radix-up]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m[radix-up]\033[0m %s\n' "$*" >&2; exit 1; }
+
+command -v jq >/dev/null || die "jq is required (brew install jq)"
+command -v "$RADIX_BIN" >/dev/null || die "radix CLI not found"
+
+# Key radix uploads with `radix assign` when its output doesn't name one
+# (documented in `radix --help`): $RADIX_SSH_KEY, else ~/.ssh/id_ed25519.
+default_ssh_key() {
+  local k="${RADIX_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+  echo "${k/#\~/$HOME}"
+}
+
+project_dir() { echo "$PROJECTS_DIR/${1:-$DEFAULT_PROJECT}"; }
+
+require_project() {
+  local dir; dir="$(project_dir "$1")"
+  [[ -f "$dir/init.sh" ]] || die "project '${1:-$DEFAULT_PROJECT}' not found; run: radix-up init ${1:-}"
+}
+
+machine_ids_mine() {
+  "$RADIX_BIN" --json machines mine | jq -r '[.. | objects | .machine_id? | select(. != null)] | unique[]'
+}
+
+ip_of_machine() {
+  "$RADIX_BIN" --json machines list | jq -r --arg id "$1" \
+    '[.. | objects | select(.machine_id? == $id) | .public_ip | select(. != null)] | first // ""'
+}
+
+machine_of_ip() {
+  "$RADIX_BIN" --json machines list | jq -r --arg ip "$1" \
+    '[.. | objects | select(.public_ip? == $ip) | .machine_id] | first // ""'
+}
+
+# A connection is one tab-separated row: mid user ip port key jump ("-" = unset).
+row() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:--}" "$5" "${6:--}"; }
+
+# Parse the ssh command radix prints after "Ready - ", e.g.
+#   ssh [-i KEY] [-p PORT] [-J JUMP] [-o ...] USER@IP
+parse_ssh_cmd() {
+  local words w user="" ip="" port="" key="" jump="" i
+  read -ra words <<< "$1"
+  for ((i = 1; i < ${#words[@]}; i++)); do
+    w="${words[$i]}"
+    case "$w" in
+      -i) key="${words[++i]}" ;;
+      -p) port="${words[++i]}" ;;
+      -J) jump="${words[++i]}" ;;
+      -o|-l|-F) i=$((i + 1)) ;;
+      -*) ;;
+      *@*) user="${w%@*}"; ip="${w#*@}" ;;
+    esac
+  done
+  [[ -n "$ip" ]] || return 1
+  [[ -n "$key" ]] || key="$(default_ssh_key)"
+  echo "$user $ip ${port:--} ${key/#\~/$HOME} ${jump:--}"
+}
+
+# State file per machine: written on assign, read by setup/ssh/info.
+save_state() { # row
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$1" > "$STATE_DIR/$(cut -f1 <<< "$1").tsv"
+}
+
+# Row for an assigned machine: from saved state, else from the API.
+lookup_conn() {
+  local mid="$1" ip
+  if [[ -f "$STATE_DIR/$mid.tsv" ]]; then cat "$STATE_DIR/$mid.tsv"; return; fi
+  ip="$(ip_of_machine "$mid")"
+  [[ -n "$ip" ]] || die "no IP known for $mid"
+  warn "$mid: not assigned via radix-up; assuming user root and key $(default_ssh_key)"
+  row "$mid" root "$ip" - "$(default_ssh_key)" -
+}
+
+ssh_opts() { # ip port key jump
+  local kh="$HOME/.radix/known_hosts.d/$1"
+  printf '%s\n' -i "$3" -o IdentitiesOnly=yes -o ConnectTimeout=10 -o ServerAliveInterval=30
+  if [[ -s "$kh" ]]; then printf '%s\n' -o "UserKnownHostsFile=$kh" -o StrictHostKeyChecking=yes
+  else printf '%s\n' -o "UserKnownHostsFile=$RADIX_UP_HOME/known_hosts" -o StrictHostKeyChecking=accept-new
+  fi
+  [[ "$2" != - ]] && printf '%s\n' -p "$2"
+  [[ "$4" != - ]] && printf '%s\n' -J "$4"
+  return 0
+}
+
+wait_for_ssh() { # user ip port key jump
+  local deadline=$((SECONDS + SSH_WAIT_SECS)) opts=() line
+  while IFS= read -r line; do opts+=("$line"); done < <(ssh_opts "$2" "$3" "$4" "$5")
+  until ssh "${opts[@]}" -o BatchMode=yes "$1@$2" true 2>/dev/null; do
+    (( SECONDS < deadline )) || return 1
+    sleep 5
+  done
+}
+
+# Run a project's init.sh locally for one node.
+run_init() { # project rank num_nodes node_ips mid user ip port key jump
+  local project="$1" mid="$5" user="$6" ip="$7" port="$8" key="$9" jump="${10}" dir
+  dir="$(project_dir "$project")"
+  log "$mid: waiting for ssh on $user@$ip (key $key)"
+  wait_for_ssh "$user" "$ip" "$port" "$key" "$jump" \
+    || { warn "$mid: ssh not reachable after ${SSH_WAIT_SECS}s"; return 1; }
+  [[ "$port" == - ]] && port=22
+  [[ "$jump" == - ]] && jump=""
+  log "$mid: running $dir/init.sh"
+  ( cd "$dir" && env \
+      RADIX_SSH_USER="$user" RADIX_NODE_IP="$ip" RADIX_SSH_PORT="$port" RADIX_SSH_KEY="$key" \
+      RADIX_PROXY_JUMP="$jump" RADIX_MACHINE_ID="$mid" \
+      RADIX_NODE_RANK="$2" RADIX_NUM_NODES="$3" RADIX_NODE_IPS="$4" \
+      RADIX_PROJECT="$project" RADIX_PROJECT_DIR="$dir" \
+      RADIX_KNOWN_HOSTS="$HOME/.radix/known_hosts.d/$ip" \
+      bash ./init.sh )
+  log "$mid: ready -> radix-up ssh $mid"
+}
+
+# Runs init on each row in parallel.
+run_inits() { # project rows
+  local project="$1" rows="$2" pids=() names=() rc=0 i=0 n ips mid user ip port key jump logf
+  n="$(grep -c . <<< "$rows")"
+  ips="$(cut -f3 <<< "$rows" | paste -sd, -)"
+  mkdir -p "$RADIX_UP_HOME/logs"
+  while IFS=$'\t' read -r mid user ip port key jump; do
+    logf="$RADIX_UP_HOME/logs/$mid-$(date +%Y%m%d-%H%M%S).log"
+    ( run_init "$project" "$i" "$n" "$ips" "$mid" "$user" "$ip" "$port" "$key" "$jump" ) > >(tee "$logf") 2>&1 &
+    pids+=($!); names+=("$mid ($logf)"); i=$((i + 1))
+  done <<< "$rows"
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || { warn "init failed: ${names[$i]}"; rc=1; }
+  done
+  return $rc
+}
+
+# Pull "--project NAME" / "--project=NAME" out of the args; the rest go to PASS_ARGS.
+parse_project() {
+  PROJECT=""; PASS_ARGS=()
+  while (( $# )); do
+    case "$1" in
+      --project)   [[ $# -ge 2 ]] || die "--project needs a value"; PROJECT="$2"; shift 2 ;;
+      --project=*) PROJECT="${1#--project=}"; shift ;;
+      *)           PASS_ARGS+=("$1"); shift ;;
+    esac
+  done
+}
+
+cmd_assign() {
+  parse_project "$@"
+  require_project "$PROJECT"
+  local out before rows="" line conn user ip port key jump mid
+  before="$(machine_ids_mine)"
+  out="$(mktemp)"
+  "$RADIX_BIN" assign ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} | tee "$out"
+
+  # radix prints "<mark> Ready - ssh [opts] <user>@<ip>" for each machine.
+  while IFS= read -r line; do
+    conn="$(parse_ssh_cmd "ssh ${line#*Ready - ssh }")" || continue
+    read -r user ip port key jump <<< "$conn"
+    mid="$(machine_of_ip "$ip")"
+    rows+="$(row "${mid:-$ip}" "$user" "$ip" "$port" "$key" "$jump")"$'\n'
+  done < <(sed -E $'s/\x1b\\[[0-9;]*m//g' "$out" | grep -E 'Ready - ssh .*@')
+  rm -f "$out"
+
+  # Fallback (e.g. output format changed): diff active assignments and look up IPs.
+  if [[ -z "$rows" ]]; then
+    warn "could not parse ssh info from radix output; falling back to API lookup (user root, key $(default_ssh_key))"
+    for mid in $(comm -13 <(sort <<< "$before") <(machine_ids_mine | sort)); do
+      rows+="$(row "$mid" root "$(ip_of_machine "$mid")" - "$(default_ssh_key)" -)"$'\n'
+    done
+  fi
+  rows="$(sed '/^$/d' <<< "$rows")"
+  [[ -n "$rows" ]] || die "no newly assigned machines found"
+  while IFS= read -r line; do save_state "$line"; done <<< "$rows"
+  run_inits "${PROJECT:-$DEFAULT_PROJECT}" "$rows"
+}
+
+cmd_setup() {
+  parse_project "$@"
+  require_project "$PROJECT"
+  (( ${#PASS_ARGS[@]} )) || die "usage: radix-up setup <machine-id>... [--project NAME]"
+  local rows="" mid
+  for mid in "${PASS_ARGS[@]}"; do rows+="$(lookup_conn "$mid")"$'\n'; done
+  run_inits "${PROJECT:-$DEFAULT_PROJECT}" "$(sed '/^$/d' <<< "$rows")"
+}
+
+cmd_ssh() {
+  local id="${1:?usage: radix-up ssh <machine-id> [cmd...]}" mid user ip port key jump opts=() line
+  shift
+  IFS=$'\t' read -r mid user ip port key jump <<< "$(lookup_conn "$id")"
+  while IFS= read -r line; do opts+=("$line"); done < <(ssh_opts "$ip" "$port" "$key" "$jump")
+  exec ssh "${opts[@]}" "$user@$ip" "$@"
+}
+
+cmd_info() {
+  local f mine mid user ip port key jump
+  mine="$(machine_ids_mine)"
+  printf '%-26s %-8s %-16s %-5s %-12s %s\n' MACHINE USER IP PORT PROXY_JUMP KEY
+  for f in "$STATE_DIR"/*.tsv; do
+    [[ -f "$f" ]] || continue
+    IFS=$'\t' read -r mid user ip port key jump < "$f"
+    grep -qxF "$mid" <<< "$mine" || continue
+    printf '%-26s %-8s %-16s %-5s %-12s %s\n' "$mid" "$user" "$ip" "$port" "$jump" "$key"
+  done
+}
+
+cmd_init() {
+  local name="${1:-$DEFAULT_PROJECT}" dir
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid project name: $name"
+  dir="$(project_dir "$name")"
+  [[ -e "$dir" ]] && die "project '$name' already exists at $dir"
+  mkdir -p "$dir"
+  cp -R "$TEMPLATE_DIR/." "$dir/"
+  chmod 700 "$RADIX_UP_HOME"
+  log "created project '$name' at $dir"
+  log "edit $dir/init.sh, then: radix-up assign <machine-id>$([[ $name != "$DEFAULT_PROJECT" ]] && echo " --project $name")"
+}
+
+cmd_list() {
+  local dir name
+  [[ -d "$PROJECTS_DIR" ]] || { echo "no projects yet; run: radix-up init [project]"; return; }
+  printf '%-20s %s\n' PROJECT PATH
+  for dir in "$PROJECTS_DIR"/*/; do
+    [[ -f "$dir/init.sh" ]] || continue
+    name="$(basename "$dir")"
+    printf '%-20s %s%s\n' "$name" "${dir%/}" "$([[ $name == "$DEFAULT_PROJECT" ]] && echo '  (default)')"
+  done
+}
+
+case "${1:-}" in
+  init)   shift; cmd_init "$@" ;;
+  list)   shift; cmd_list ;;
+  assign) shift; cmd_assign "$@" ;;
+  setup)  shift; cmd_setup "$@" ;;
+  ssh)    shift; cmd_ssh "$@" ;;
+  info)   shift; cmd_info ;;
+  ""|-h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command: $1 (try --help)" ;;
+esac

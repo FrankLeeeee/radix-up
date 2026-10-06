@@ -1,0 +1,3 @@
+# Copied to ~/.radix_env on the container and sourced by ~/.bashrc.
+# HF_TOKEN=hf_xxx
+# WANDB_API_KEY=xxx
