@@ -19,19 +19,30 @@ radix-up assign host-1-2-3-4 --gpus 8 --project sglang-dev
 ## Requirements
 
 - macOS or Linux with `bash`, `ssh`, `tar`
+- `npm` (for installation)
 - [`jq`](https://jqlang.github.io/jq/) (`brew install jq`)
 - The `radix` CLI, logged in (`radix login`)
 
 ## Installation
 
+With npm (no Node code is involved; npm is only used to install the script):
+
 ```bash
-git clone <this repo> radix-cli-helper
-cd radix-cli-helper
-ln -s "$PWD/bin/radix-up" /usr/local/bin/radix-up
+npm install -g github:FrankLeeeee/radix-cli-helper      # install / upgrade
+npm uninstall -g radix-up                               # uninstall
 ```
 
-Use an absolute path for the symlink; `radix-up` resolves it to find `lib/` and
-`templates/`.
+Uninstalling leaves your projects in `~/.config/radix-up`; delete that folder too
+if you want a clean removal.
+
+From a checkout (for development):
+
+```bash
+git clone https://github.com/FrankLeeeee/radix-cli-helper.git
+cd radix-cli-helper
+npm link            # puts radix-up on your PATH, pointing at this checkout
+npm unlink -g radix-up
+```
 
 ## Quick start
 

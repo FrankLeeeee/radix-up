@@ -1,0 +1,30 @@
+{
+  "name": "radix-up",
+  "version": "0.1.0",
+  "description": "Wrapper around `radix assign` that bootstraps fresh SGLang community GPU containers with per-project init scripts",
+  "bin": {
+    "radix-up": "bin/radix-up"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "templates/"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FrankLeeeee/radix-cli-helper.git"
+  },
+  "homepage": "https://github.com/FrankLeeeee/radix-cli-helper#readme",
+  "author": "Frank Lee",
+  "keywords": [
+    "radix",
+    "sglang",
+    "gpu",
+    "ssh",
+    "cli"
+  ]
+}

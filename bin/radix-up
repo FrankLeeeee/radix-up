@@ -19,7 +19,17 @@ set -euo pipefail
 RADIX_UP_HOME="${RADIX_UP_HOME:-$HOME/.config/radix-up}"
 RADIX_BIN="${RADIX_BIN:-radix}"
 SSH_WAIT_SECS="${RADIX_UP_SSH_WAIT:-300}"
-SCRIPT_DIR="$(cd "$(dirname "$(readlink "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")" && pwd)"
+# Resolve symlinks (npm/brew install a relative symlink) to find lib/ and templates/.
+resolve_self() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [[ -L "$src" ]]; do
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" == /* ]] || src="$dir/$src"
+  done
+  cd "$(dirname "$src")" && pwd
+}
+SCRIPT_DIR="$(resolve_self)"
 TEMPLATE_DIR="$SCRIPT_DIR/../templates"
 export RADIX_UP_LIB="$SCRIPT_DIR/../lib/radix-up-lib.sh"
 PROJECTS_DIR="$RADIX_UP_HOME/projects"
