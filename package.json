@@ -16,9 +16,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/FrankLeeeee/radix-cli-helper.git"
+    "url": "git+https://github.com/FrankLeeeee/radix-up.git"
   },
-  "homepage": "https://github.com/FrankLeeeee/radix-cli-helper#readme",
+  "homepage": "https://github.com/FrankLeeeee/radix-up#readme",
   "author": "Frank Lee",
   "keywords": [
     "radix",
