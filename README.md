@@ -150,7 +150,7 @@ user, IP, port, key, jump host and known_hosts:
 ```bash
 remote nvidia-smi              # run a command on the node
 remote <<'EOF'                 # run a bash script on the node
-cd ~/workspace && git pull
+cd ~/sglang && git pull
 EOF
 push files                     # copy the contents of ./files into remote ~
 push ~/.gitconfig              # copy a single file into remote ~
@@ -177,7 +177,7 @@ set -euo pipefail
 set -a; source ~/.radix_env; set +a
 grep -q radix_env ~/.bashrc || echo 'set -a; . ~/.radix_env; set +a' >> ~/.bashrc
 
-mkdir -p ~/workspace && cd ~/workspace
+cd ~
 [[ -d sglang ]] || git clone https://github.com/sgl-project/sglang.git
 cd sglang && pip install -e "python[all]"
 

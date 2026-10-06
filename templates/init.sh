@@ -28,7 +28,7 @@ fi
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 grep -q github.com ~/.ssh/known_hosts 2>/dev/null || ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
 
-mkdir -p ~/workspace && cd ~/workspace
+cd ~
 [[ -d sglang ]] || git clone https://github.com/sgl-project/sglang.git
 # pip install -e "sglang/python[all]"
 
