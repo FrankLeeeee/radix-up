@@ -24,6 +24,9 @@ if [[ -f ~/.radix_env ]]; then
   set -a; source ~/.radix_env; set +a
   grep -q radix_env ~/.bashrc 2>/dev/null || echo '[ -f ~/.radix_env ] && set -a && . ~/.radix_env && set +a' >> ~/.bashrc
 fi
+# Login shells (e.g. `radix shell`) read ~/.bash_profile or ~/.profile, not ~/.bashrc.
+profile=~/.profile; [[ -f ~/.bash_profile ]] && profile=~/.bash_profile
+grep -q bashrc "$profile" 2>/dev/null || echo '[ -n "$BASH_VERSION" ] && [ -f ~/.bashrc ] && . ~/.bashrc' >> "$profile"
 
 mkdir -p ~/.ssh && chmod 700 ~/.ssh
 grep -q github.com ~/.ssh/known_hosts 2>/dev/null || ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
