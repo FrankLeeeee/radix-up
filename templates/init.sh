@@ -7,6 +7,7 @@
 #   remote CMD...   /  remote <<'EOF' ... EOF    run on the node
 #   push LOCAL [REMOTE_DIR]                     copy a file/dir (default: remote ~)
 # Keep it idempotent so `radix-up setup <machine-id>` can re-run it.
+# Nodes are rootless: install everything into $HOME (no sudo/apt-get).
 set -euo pipefail
 source "$RADIX_UP_LIB"
 
@@ -22,12 +23,6 @@ if [[ -f ~/.radix_env ]]; then
   chmod 600 ~/.radix_env
   set -a; source ~/.radix_env; set +a
   grep -q radix_env ~/.bashrc 2>/dev/null || echo '[ -f ~/.radix_env ] && set -a && . ~/.radix_env && set +a' >> ~/.bashrc
-fi
-
-if command -v apt-get >/dev/null; then
-  SUDO=$([[ $(id -u) -eq 0 ]] || echo sudo)
-  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux htop git curl vim >/dev/null
 fi
 
 mkdir -p ~/.ssh && chmod 700 ~/.ssh

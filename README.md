@@ -11,7 +11,7 @@ reach each new machine, and runs a **project-specific init script** against it.
 ```bash
 radix-up assign host-1-2-3-4 --gpus 8 --project sglang-dev
 # ... radix assign output ...
-# [radix-up] host-1-2-3-4: waiting for ssh on root@1.2.3.4
+# [radix-up] host-1-2-3-4: waiting for ssh on alice@1.2.3.4
 # [radix-up] host-1-2-3-4: running ~/.config/radix-up/projects/sglang-dev/init.sh
 # [radix-up] host-1-2-3-4: ready -> radix-up ssh host-1-2-3-4
 ```
@@ -70,24 +70,26 @@ radix-up assign <machine-id> --project sglang-dev    # uses sglang-dev
 | `radix-up setup <machine-id>... [--project NAME]` | Re-run an init script on machines you already hold, e.g. after editing it or to apply a different project. |
 | `radix-up ssh <machine-id> [cmd...]` | SSH into a machine with the same user/key/port/jump used for setup. |
 | `radix-up info` | Show the saved connection info (user, IP, port, proxy jump, key) for your active machines. |
+| `radix-up logs [machine-id] [-f]` | Print the latest init log (for that machine, or overall); `-f` follows it while setup is running. |
 
 `--project NAME` and `--project=NAME` are both accepted.
 
 ## How it works
 
 1. **Assign.** `radix-up` checks that the project exists (so a typo doesn't cost you
-   credits), then runs `radix assign` with your arguments and shows its output as usual.
-2. **Extract connection info.** For every machine, `radix assign` prints a line like
-   ```
-   ✓ Ready - ssh [-i KEY] [-p PORT] [-J JUMP] user@ip
-   ```
-   `radix-up` parses the user, IP, port, proxy jump and SSH key from it, and maps
-   the IP back to its machine ID through `radix machines list`.
-   - If the line has no `-i`, the key is the one radix uploads with each assign:
-     `$RADIX_SSH_KEY`, or `~/.ssh/id_ed25519` if unset (as documented in `radix --help`).
-   - If no `Ready` lines can be parsed (e.g. radix changed its output format),
-     `radix-up` falls back to diffing `radix machines mine` before/after the assign,
-     and warns that it is assuming user `root` and the default key.
+   credits), then runs `radix --json assign` with your arguments. Plain `radix assign`
+   SSHes into the machine as soon as it is ready; `--json` makes it return instead, so
+   setup can continue. The raw response is saved to
+   `~/.config/radix-up/logs/assign-<timestamp>.json`.
+2. **Extract connection info.** From the JSON, `radix-up` takes each machine's
+   `machine_id`, `ssh_user`, `public_ip` and `ssh_proxy_jump` (looking up the IP with
+   `radix machines list` if it is missing). The SSH key is the one radix uploads with
+   the assign: `$RADIX_SSH_KEY`, or `~/.ssh/id_ed25519` if unset (as documented in
+   `radix --help`).
+   - If no `ssh_user` is present, your GitHub login (lowercased, from `radix whoami`)
+     is assumed, with a warning.
+   - If the JSON contains no machines at all, `radix-up` falls back to diffing
+     `radix machines mine` before/after the assign.
 3. **Save state.** The connection info for each machine is saved to
    `~/.config/radix-up/state/<machine-id>.tsv`, so `setup` and `ssh` reuse it later.
 4. **Wait for SSH.** Each node is polled until SSH accepts the key (up to 5 minutes by
@@ -129,7 +131,7 @@ directory. It receives:
 | `RADIX_MACHINE_ID` | Machine ID, e.g. `host-85-234-79-221` |
 | `RADIX_SSH_USER` | SSH user from `radix assign` output |
 | `RADIX_NODE_IP` | Node IP from `radix assign` output |
-| `RADIX_SSH_PORT` | SSH port (`22` unless radix printed `-p`) |
+| `RADIX_SSH_PORT` | SSH port (`22`) |
 | `RADIX_SSH_KEY` | SSH private key path (see [How it works](#how-it-works)) |
 | `RADIX_PROXY_JUMP` | `-J` bastion, empty if none |
 | `RADIX_KNOWN_HOSTS` | radix's known_hosts file for this node |
@@ -152,7 +154,7 @@ cd ~/workspace && git pull
 EOF
 push files                     # copy the contents of ./files into remote ~
 push ~/.gitconfig              # copy a single file into remote ~
-push ./configs /root/configs   # copy into a specific remote directory
+push ./configs configs        # copy into ~/configs on the node
 ```
 
 Scripts sent with `remote <<'EOF'` also see `RADIX_MACHINE_ID`, `RADIX_NODE_RANK`,
@@ -185,7 +187,8 @@ fi
 EOF
 ```
 
-Keep scripts **idempotent** (`[[ -d repo ]] || git clone ...`, `grep -q ... || echo >> ...`)
+Nodes are **rootless**: there is no `sudo`/`apt-get`, so install tools into `$HOME`
+(uv, rustup, conda, pip `--user`, ...). Keep scripts **idempotent** (`[[ -d repo ]] || git clone ...`, `grep -q ... || echo >> ...`)
 so `radix-up setup` can safely re-run them.
 
 ## Configuration
@@ -195,14 +198,14 @@ so `radix-up setup` can safely re-run them.
 | `RADIX_UP_HOME` | `~/.config/radix-up` | Where projects, state and logs live |
 | `RADIX_UP_SSH_WAIT` | `300` | Seconds to wait for SSH on a new node |
 | `RADIX_BIN` | `radix` | Path to the radix CLI |
-| `RADIX_SSH_KEY` | `~/.ssh/id_ed25519` | Read by radix itself, and used by `radix-up` when radix doesn't print a key |
+| `RADIX_SSH_KEY` | `~/.ssh/id_ed25519` | The key radix uploads with each assign; `radix-up` uses the same one |
 
 ## Troubleshooting
 
 - **`project 'X' not found`**: run `radix-up init X`, or check `radix-up list`.
-- **`could not parse ssh info from radix output`**: radix's output format may have
-  changed. Setup still runs with user `root` and the default key; check with
-  `radix-up info`, and please open an issue with the `radix assign` output.
+- **`no machines found in radix JSON output`** or **`no ssh_user ... assuming <user>`**:
+  radix's JSON format may have changed. Check `radix-up info`, and open an issue with
+  the saved `~/.config/radix-up/logs/assign-*.json`.
 - **`ssh not reachable after 300s`**: the container may still be starting, or the
   key is wrong. Check `radix-up info`, try `radix shell <machine-id>`, then
   `radix-up setup <machine-id>`. Raise `RADIX_UP_SSH_WAIT` for slow nodes.
@@ -215,7 +218,7 @@ so `radix-up setup` can safely re-run them.
 - The init script runs over a regular SSH session from your machine; if your laptop
   sleeps or disconnects, a long-running step (e.g. a big `pip install`) is interrupted.
   Wrap long steps in `nohup`/`tmux` on the remote side if this is a problem.
-- Connection info is read from the human-readable output of `radix assign`, which
-  is not a stable interface.
+- `radix-up` relies on `radix --json assign` returning instead of opening a shell, and
+  on its JSON field names; neither is a documented interface.
 - Machines assigned with plain `radix assign` (not through `radix-up`) have no saved
-  state; `radix-up setup` then assumes user `root` and the default key.
+  state; `radix-up setup` then assumes your lowercased GitHub login and the default key.

@@ -8,6 +8,7 @@
 #   radix-up setup <machine-id> [--project NAME]   re-run an init script on an assigned machine
 #   radix-up ssh <machine-id> [cmd...]             ssh with the same options init scripts use
 #   radix-up info                                  show known connection info
+#   radix-up logs [machine-id] [-f]                show (or follow) the latest init log
 #
 # Projects live in $RADIX_UP_HOME/projects/<name>/ (default ~/.config/radix-up),
 # each holding an init.sh plus optional files/. The init script runs LOCALLY with:
@@ -50,6 +51,15 @@ default_ssh_key() {
   echo "${k/#\~/$HOME}"
 }
 
+# Fallback ssh user when radix doesn't report one. Nodes are rootless and log you in
+# as your GitHub login, lowercased (e.g. FrankLeeeee -> frankleeeee).
+default_ssh_user() {
+  local login
+  login="$("$RADIX_BIN" --json whoami | jq -r '.github_login // empty')"
+  [[ -n "$login" ]] || die "cannot determine ssh user: no github_login in 'radix whoami'"
+  tr '[:upper:]' '[:lower:]' <<< "$login"
+}
+
 project_dir() { echo "$PROJECTS_DIR/${1:-$DEFAULT_PROJECT}"; }
 
 require_project() {
@@ -74,27 +84,6 @@ machine_of_ip() {
 # A connection is one tab-separated row: mid user ip port key jump ("-" = unset).
 row() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:--}" "$5" "${6:--}"; }
 
-# Parse the ssh command radix prints after "Ready - ", e.g.
-#   ssh [-i KEY] [-p PORT] [-J JUMP] [-o ...] USER@IP
-parse_ssh_cmd() {
-  local words w user="" ip="" port="" key="" jump="" i
-  read -ra words <<< "$1"
-  for ((i = 1; i < ${#words[@]}; i++)); do
-    w="${words[$i]}"
-    case "$w" in
-      -i) key="${words[++i]}" ;;
-      -p) port="${words[++i]}" ;;
-      -J) jump="${words[++i]}" ;;
-      -o|-l|-F) i=$((i + 1)) ;;
-      -*) ;;
-      *@*) user="${w%@*}"; ip="${w#*@}" ;;
-    esac
-  done
-  [[ -n "$ip" ]] || return 1
-  [[ -n "$key" ]] || key="$(default_ssh_key)"
-  echo "$user $ip ${port:--} ${key/#\~/$HOME} ${jump:--}"
-}
-
 # State file per machine: written on assign, read by setup/ssh/info.
 save_state() { # row
   mkdir -p "$STATE_DIR"
@@ -107,8 +96,9 @@ lookup_conn() {
   if [[ -f "$STATE_DIR/$mid.tsv" ]]; then cat "$STATE_DIR/$mid.tsv"; return; fi
   ip="$(ip_of_machine "$mid")"
   [[ -n "$ip" ]] || die "no IP known for $mid"
-  warn "$mid: not assigned via radix-up; assuming user root and key $(default_ssh_key)"
-  row "$mid" root "$ip" - "$(default_ssh_key)" -
+  local user; user="$(default_ssh_user)"
+  warn "$mid: not assigned via radix-up; assuming user $user and key $(default_ssh_key)"
+  row "$mid" "$user" "$ip" - "$(default_ssh_key)" -
 }
 
 ssh_opts() { # ip port key jump
@@ -163,7 +153,7 @@ run_inits() { # project rows
     pids+=($!); names+=("$mid ($logf)"); i=$((i + 1))
   done <<< "$rows"
   for i in "${!pids[@]}"; do
-    wait "${pids[$i]}" || { warn "init failed: ${names[$i]}"; rc=1; }
+    wait "${pids[$i]}" || { warn "init failed: ${names[$i]} — full log: radix-up logs ${names[$i]%% *}"; rc=1; }
   done
   return $rc
 }
@@ -180,28 +170,39 @@ parse_project() {
   done
 }
 
+# `radix assign` normally execs ssh into the machine once it is ready. With the global
+# --json flag it prints the assignment and returns instead, so we use that and do
+# the wait-for-ssh ourselves.
 cmd_assign() {
   parse_project "$@"
   require_project "$PROJECT"
-  local out before rows="" line conn user ip port key jump mid
+  local json before rows="" line mid user ip jump key
   before="$(machine_ids_mine)"
-  out="$(mktemp)"
-  "$RADIX_BIN" assign ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} | tee "$out"
+  json="$("$RADIX_BIN" --json assign ${PASS_ARGS[@]+"${PASS_ARGS[@]}"})"
+  mkdir -p "$RADIX_UP_HOME/logs"
+  printf '%s\n' "$json" > "$RADIX_UP_HOME/logs/assign-$(date +%Y%m%d-%H%M%S).json"
+  key="$(default_ssh_key)"  # the key whose .pub radix uploads with the assign
 
-  # radix prints "<mark> Ready - ssh [opts] <user>@<ip>" for each machine.
-  while IFS= read -r line; do
-    conn="$(parse_ssh_cmd "ssh ${line#*Ready - ssh }")" || continue
-    read -r user ip port key jump <<< "$conn"
-    mid="$(machine_of_ip "$ip")"
-    rows+="$(row "${mid:-$ip}" "$user" "$ip" "$port" "$key" "$jump")"$'\n'
-  done < <(sed -E $'s/\x1b\\[[0-9;]*m//g' "$out" | grep -E 'Ready - ssh .*@')
-  rm -f "$out"
+  # One row per machine_id, merging every object that mentions it.
+  while IFS=$'\t' read -r mid user ip jump; do
+    [[ "$user" == - ]] && user=""
+    [[ "$ip" == - ]] && ip="$(ip_of_machine "$mid")"
+    [[ -n "$ip" ]] || { warn "$mid: no IP found, skipping"; continue; }
+    [[ -n "$user" ]] || { user="$(default_ssh_user)"; warn "$mid: no ssh_user in radix output, assuming $user"; }
+    log "assigned $mid ($user@$ip)"
+    rows+="$(row "$mid" "$user" "$ip" - "$key" "$jump")"$'\n'
+  done < <(jq -r '
+    [.. | objects | select(.machine_id? != null)]
+    | group_by(.machine_id)[] | add
+    | [.machine_id, (.ssh_user // ""), (.public_ip // ""), (.ssh_proxy_jump // "")]
+    | map(if . == "" then "-" else . end) | @tsv' <<< "$json" 2>/dev/null)
 
-  # Fallback (e.g. output format changed): diff active assignments and look up IPs.
+  # Fallback (unexpected JSON shape): diff active assignments.
   if [[ -z "$rows" ]]; then
-    warn "could not parse ssh info from radix output; falling back to API lookup (user root, key $(default_ssh_key))"
+    user="$(default_ssh_user)"
+    warn "no machines found in radix JSON output; falling back to API lookup (user $user)"
     for mid in $(comm -13 <(sort <<< "$before") <(machine_ids_mine | sort)); do
-      rows+="$(row "$mid" root "$(ip_of_machine "$mid")" - "$(default_ssh_key)" -)"$'\n'
+      rows+="$(row "$mid" "$user" "$(ip_of_machine "$mid")" - "$key" -)"$'\n'
     done
   fi
   rows="$(sed '/^$/d' <<< "$rows")"
@@ -225,6 +226,18 @@ cmd_ssh() {
   IFS=$'\t' read -r mid user ip port key jump <<< "$(lookup_conn "$id")"
   while IFS= read -r line; do opts+=("$line"); done < <(ssh_opts "$ip" "$port" "$key" "$jump")
   exec ssh "${opts[@]}" "$user@$ip" "$@"
+}
+
+# Print (or follow) the newest init log, optionally for one machine.
+cmd_logs() {
+  local follow="" mid="" f
+  for a in "$@"; do
+    case "$a" in -f|--follow) follow=1 ;; -*) die "unknown option: $a" ;; *) mid="$a" ;; esac
+  done
+  f="$(ls -t "$RADIX_UP_HOME/logs/${mid:-}"*.log 2>/dev/null | head -1 || true)"
+  [[ -n "$f" ]] || die "no init logs${mid:+ for $mid} in $RADIX_UP_HOME/logs"
+  log "$f"
+  if [[ -n "$follow" ]]; then exec tail -n +1 -f "$f"; else cat "$f"; fi
 }
 
 cmd_info() {
@@ -269,6 +282,7 @@ case "${1:-}" in
   setup)  shift; cmd_setup "$@" ;;
   ssh)    shift; cmd_ssh "$@" ;;
   info)   shift; cmd_info ;;
-  ""|-h|--help|help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  logs)   shift; cmd_logs "$@" ;;
+  ""|-h|--help|help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "unknown command: $1 (try --help)" ;;
 esac
