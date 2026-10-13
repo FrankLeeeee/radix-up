@@ -255,6 +255,10 @@ footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wr
     </div>
   </div>
   <p class="sub" style="margin-bottom:0">Requires macOS or Linux with <code>bash</code>, <code>ssh</code>, <code>tar</code>, <a href="https://jqlang.github.io/jq/"><code>jq</code></a>, and the <code>radix</code> CLI logged in with <code>radix login</code>. Your projects live in <code>~/.config/radix-up</code> and survive uninstalls.</p>
+
+  <h3>Agent skill</h3>
+  <p class="sub" style="margin-bottom:0">Teach your coding agent (Cursor, Claude Code, Codex, …) to assign, use and release machines with <code>radix</code> and <code>radix-up</code>. The <code>radix-cli</code> skill installs with the <a href="https://skills.sh/">skills</a> CLI; <code>-g</code> installs it for your user instead of the current project.</p>
+  <div class="code"><pre><code class="lang-bash">npx skills add FrankLeeeee/radix-up --skill radix-cli -g</code></pre><button class="copy" type="button" aria-label="Copy code">Copy</button></div>
 </section>
 
 <section id="usage">

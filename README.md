@@ -28,3 +28,13 @@ npm uninstall -g radix-up                            # uninstall
 ```
 
 Your projects live in `~/.config/radix-up` and are kept when you uninstall.
+
+## Agent skill
+
+The `radix-cli` skill teaches coding agents (Cursor, Claude Code, Codex, …) to assign,
+use and release machines with `radix` and `radix-up`. Install it with the
+[skills](https://skills.sh/) CLI (`-g` installs it for your user instead of the current project):
+
+```bash
+npx skills add FrankLeeeee/radix-up --skill radix-cli -g
+```
