@@ -44,6 +44,12 @@ die()  { printf '\033[31m[radix-up]\033[0m %s\n' "$*" >&2; exit 1; }
 command -v jq >/dev/null || die "jq is required (brew install jq)"
 command -v "$RADIX_BIN" >/dev/null || die "radix CLI not found"
 
+# `radix --json` can print progress lines (e.g. "Assigning ...") before the JSON
+# document; drop everything before the first line that opens an object or array.
+radix_json() {
+  "$RADIX_BIN" --json "$@" | sed -n '/^[[:space:]]*[{[]/,$p'
+}
+
 # Key radix uploads with `radix assign` when its output doesn't name one
 # (documented in `radix --help`): $RADIX_SSH_KEY, else ~/.ssh/id_ed25519.
 default_ssh_key() {
@@ -55,7 +61,7 @@ default_ssh_key() {
 # as your GitHub login, lowercased (e.g. FrankLeeeee -> frankleeeee).
 default_ssh_user() {
   local login
-  login="$("$RADIX_BIN" --json whoami | jq -r '.github_login // empty')"
+  login="$(radix_json whoami | jq -r '.github_login // empty')"
   [[ -n "$login" ]] || die "cannot determine ssh user: no github_login in 'radix whoami'"
   tr '[:upper:]' '[:lower:]' <<< "$login"
 }
@@ -68,16 +74,16 @@ require_project() {
 }
 
 machine_ids_mine() {
-  "$RADIX_BIN" --json machines mine | jq -r '[.. | objects | .machine_id? | select(. != null)] | unique[]'
+  radix_json machines mine | jq -r '[.. | objects | .machine_id? | select(. != null)] | unique[]'
 }
 
 ip_of_machine() {
-  "$RADIX_BIN" --json machines list | jq -r --arg id "$1" \
+  radix_json machines list | jq -r --arg id "$1" \
     '[.. | objects | select(.machine_id? == $id) | .public_ip | select(. != null)] | first // ""'
 }
 
 machine_of_ip() {
-  "$RADIX_BIN" --json machines list | jq -r --arg ip "$1" \
+  radix_json machines list | jq -r --arg ip "$1" \
     '[.. | objects | select(.public_ip? == $ip) | .machine_id] | first // ""'
 }
 
@@ -178,7 +184,7 @@ cmd_assign() {
   require_project "$PROJECT"
   local json before rows="" line mid user ip jump key
   before="$(machine_ids_mine)"
-  json="$("$RADIX_BIN" --json assign ${PASS_ARGS[@]+"${PASS_ARGS[@]}"})"
+  json="$(radix_json assign ${PASS_ARGS[@]+"${PASS_ARGS[@]}"})"
   mkdir -p "$RADIX_UP_HOME/logs"
   printf '%s\n' "$json" > "$RADIX_UP_HOME/logs/assign-$(date +%Y%m%d-%H%M%S).json"
   key="$(default_ssh_key)"  # the key whose .pub radix uploads with the assign
